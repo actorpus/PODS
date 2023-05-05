@@ -85,16 +85,14 @@ class Conversation(threading.Thread):
         if self._partner_pubkey is None:
             print("Failed to send message, no pubkey was found")
             return
-
-        # No_of_messages = len(message) % 1000
-
-        message = pgpy.PGPMessage.new(message)
-        message = self._partner_pubkey.encrypt(message)
-        message = message.__bytes__()
-        message = encode_to_braille(message)
-        message = break_every_n(message, 48)
-
-        self._send_message(f"```ml\nMESSAGE\n``````{message}``````yaml\nsencrypord\n```")
+        
+        for i in range(len(message) % 1000+1):
+            message = pgpy.PGPMessage.new(message[i*1000, i*1000 + 1000])
+            message = self._partner_pubkey.encrypt(message)
+            message = message.__bytes__()
+            message = encode_to_braille(message)
+            message = break_every_n(message, 48)
+            self._send_message(f"```ml\nMESSAGE\n``````{message}``````yaml\nsencrypord\n```")
 
     def send_key(self):
         pub_key = self._keypair.pubkey.__bytes__()
