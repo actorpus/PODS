@@ -5,6 +5,7 @@ import threading
 import asyncio
 from datetime import timedelta
 import os
+from functools import wraps
 
 
 def encode_to_braille(data: bytes) -> str:
@@ -45,13 +46,26 @@ class Conversation(threading.Thread):
         self._user_client = user
 
         self._keypair = self._generate_key()
+        self._partner_pubkey: pgpy.PGPKey | None = None
+
+    def bind_partner(self, message):
+        message = message.content\
+            .replace("```ml\nTEMPORARY CONVERSATION KEY\n``````", "")\
+            .replace("``````yaml\nsencrypord\n```", "")\
+            .replace("\n", "")
+
+        key = decode_from_braille(message)
+        key, _ = pgpy.PGPKey.from_blob(key)
+        self._partner_pubkey = key
+
+        self.send_message("Key received!")
 
     def _generate_key(self):
         key = pgpy.PGPKey.new(PubKeyAlgorithm.RSAEncryptOrSign, 2048)
         uid = pgpy.PGPUID.new(
             str(self._user_client.user),
             comment="enc by actorp.us#7755",
-            email=str(self._user_client.user.id),
+            email=str(self._user_client.user.id) + "@discord.com",
         )
 
         key.add_uid(
@@ -68,22 +82,26 @@ class Conversation(threading.Thread):
         )
 
     def send_message(self, message):
-        # encrypt it here
+        if self._partner_pubkey is None:
+            print("Failed to send message, no pubkey was found")
+            return
 
-        self._send_message(message)
+        # No_of_messages = len(message) % 1000
+
+        message = pgpy.PGPMessage.new(message)
+        message = self._partner_pubkey.encrypt(message)
+        message = message.__bytes__()
+        message = encode_to_braille(message)
+        message = break_every_n(message, 48)
+
+        self._send_message(f"```ml\nMESSAGE\n``````{message}``````yaml\nsencrypord\n```")
 
     def send_key(self):
         pub_key = self._keypair.pubkey.__bytes__()
         pub_key = encode_to_braille(pub_key)
         pub_key = break_every_n(pub_key, 48)
 
-        self._send_message(f"""
-```ml
-TEMPORARY CONVERSATION KEY
-``````{pub_key}``````yaml
-sencrypord
-```
-""")
+        self._send_message(f"```ml\nTEMPORARY CONVERSATION KEY\n``````{pub_key}``````yaml\nsencrypord\n```")
 
 
 class Client(discord.Client):
@@ -119,18 +137,54 @@ class Client(discord.Client):
         del self.conversations[channel_id]
 
     async def on_ready(self):
-        print(f"loggin in as {self.user}")
+        print(f"logging in as {self.user}, waiting for conversations")
 
         while True:
             await self._update_messages()
 
-    async def on_message(self, message):
-        # only respond to ourselves
-        if message.author != self.user:
+    async def connection_request(self, message):
+        if message.channel.id in self.conversations:
+            self.conversations[message.channel.id].bind_partner(message)
             return
 
-        if message.content == '!!enc':
+        print("No conversation for", message.author, "found, creating one now.")
+        await self.start_conversation(message.channel)
+        self.conversations[message.channel.id].bind_partner(message)
+
+    async def parse_message(self, message):
+        ...
+
+    async def on_message(self, message: discord.Message):
+        # only respond to DM's
+        if not isinstance(message.channel, discord.channel.DMChannel):
+            return
+
+        if message.author == self.user and message.content == '!!enc':
+            await message.delete()
             await self.start_conversation(message.channel)
+            return
+
+        if message.author == self.user:
+            return
+
+        if not message.content.endswith("```yaml\nsencrypord\n```"):
+            return
+
+        if message.content.startswith("```ml\nTEMPORARY CONVERSATION KEY\n```"):
+            print("Conversation request from", message.author)
+            await self.connection_request(message)
+            return
+
+        print("New message from", message.author)
+        await self.parse_message(message)
+        return
 
 
-Client().run(os.environ["UserToken"])
+if __name__ == '__main__':
+    try:
+        token = os.environ["UserToken"]
+    except KeyError:
+        print("UserToken not found in environment variables")
+        token = input("Enter token now > ")
+
+    Client().run(token)
