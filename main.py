@@ -6,6 +6,7 @@ import asyncio
 from datetime import timedelta
 import os
 from functools import wraps
+import random
 
 
 def encode_to_braille(data: bytes) -> str:
@@ -49,9 +50,9 @@ class Conversation(threading.Thread):
         self._partner_pubkey: pgpy.PGPKey | None = None
 
     def bind_partner(self, message):
-        message = message.content\
-            .replace("```ml\nTEMPORARY CONVERSATION KEY\n``````", "")\
-            .replace("``````yaml\nsencrypord\n```", "")\
+        message = message.content \
+            .replace("```ml\nTEMPORARY CONVERSATION KEY\n``````", "") \
+            .replace("``````yaml\nsencrypord\n```", "") \
             .replace("\n", "")
 
         key = decode_from_braille(message)
@@ -60,12 +61,17 @@ class Conversation(threading.Thread):
 
         self.send_message("Key received!")
 
+    def parse_message(self, message):
+        print("new message", message.author, message.content)
+        # decrypt and push message to veiwer
+
     def _generate_key(self):
         key = pgpy.PGPKey.new(PubKeyAlgorithm.RSAEncryptOrSign, 2048)
         uid = pgpy.PGPUID.new(
             str(self._user_client.user),
-            comment="enc by actorp.us#7755",
-            email=str(self._user_client.user.id) + "@discord.com",
+            comment="sencrypord | actorp.us#7755",
+            email=str(self._user_client.user.id) + "@user.discord.com",
+            # possible automated email system on custom domain to process email to discord
         )
 
         key.add_uid(
@@ -77,7 +83,7 @@ class Conversation(threading.Thread):
         return key
 
     def _send_message(self, message_content):
-        self._user_client.message_que.append(
+        return self._user_client.message_que.append(
             (self._channel, message_content)
         )
 
@@ -85,21 +91,45 @@ class Conversation(threading.Thread):
         if self._partner_pubkey is None:
             print("Failed to send message, no pubkey was found")
             return
-        
-        for i in range(len(message) % 1000+1):
-            message = pgpy.PGPMessage.new(message[i*1000, i*1000 + 1000])
-            message = self._partner_pubkey.encrypt(message)
-            message = message.__bytes__()
-            message = encode_to_braille(message)
+
+        message_id = random.randbytes(8).hex().upper()
+
+        message = pgpy.PGPMessage.new(message)
+        message = self._partner_pubkey.encrypt(message)
+        message = message.__bytes__()
+        message = encode_to_braille(message)
+
+        if len(message) < 1000:
             message = break_every_n(message, 48)
-            self._send_message(f"```ml\nMESSAGE\n``````{message}``````yaml\nsencrypord\n```")
+            return self._send_message(f"```ml\n"
+                                      # message number, total parts, message id
+                                      f"MESSAGE 1 1 ID{message_id}\n"
+                                      f"``````{message}``````yaml\n"
+                                      f"sencrypord\n"
+                                      f"```")
+        message_parts = [
+            message[i: i + 1000]
+            for i in range(0, len(message), 1000)
+        ]
+
+        for i, part in enumerate(message_parts):
+            part = break_every_n(part, 48)
+            return self._send_message(f"```ml\n"
+                                      f"MESSAGE {i} {len(message_parts)} ID{message_id}\n"
+                                      f"``````{part}``````yaml\n"
+                                      f"sencrypord\n"
+                                      f"```")
 
     def send_key(self):
         pub_key = self._keypair.pubkey.__bytes__()
         pub_key = encode_to_braille(pub_key)
         pub_key = break_every_n(pub_key, 48)
 
-        self._send_message(f"```ml\nTEMPORARY CONVERSATION KEY\n``````{pub_key}``````yaml\nsencrypord\n```")
+        self._send_message(f"```ml\n"
+                           f"TEMPORARY CONVERSATION KEY\n"
+                           f"``````{pub_key}``````yaml\n"
+                           f"sencrypord\n"
+                           f"```")
 
 
 class Client(discord.Client):
@@ -107,9 +137,7 @@ class Client(discord.Client):
         super(Client, self).__init__()
         self.conversations = {}
         self.message_que = []
-
-        # loop = asyncio.get_event_loop()
-        # loop.create_task(self._update_messages())
+        self.message_parts = {}
 
     async def start_conversation(self, channel):
         conv = Conversation(channel, self)
@@ -128,8 +156,6 @@ class Client(discord.Client):
         message_channel, message_content = self.message_que.pop(0)
 
         await message_channel.send(message_content)
-
-        # print("sending", message_channel_id, message_content)
 
     async def end_conversation(self, channel_id):
         del self.conversations[channel_id]
@@ -150,7 +176,37 @@ class Client(discord.Client):
         self.conversations[message.channel.id].bind_partner(message)
 
     async def parse_message(self, message):
-        ...
+        if message.channel.id not in self.conversations:
+            return
+
+        message_number, message = message.content\
+            .replace("```ml\nMESSAGE ", "", 1)\
+            .split(" ", 1)
+        message_number = int(message_number)
+
+        total_parts, message = message.split(" ", 1)
+        total_parts = int(total_parts)
+
+        message_id, message = message.split("\n", 1)
+        message_id = message_id[2:]
+
+        message = message\
+            .replace("``````", "", 1)\
+            .replace("``````yaml\nsencrypord\n```", "", 1)
+
+        if message_id in self.message_parts:
+            self.message_parts[message_id][message_number] = message
+
+            if len(self.message_parts[message_id]) == total_parts:
+                self.conversations[message.channel.id].parse_message(
+                    "".join(self.message_parts[message_id].values())
+                )
+
+            return
+
+        self.message_parts[message_id] = {
+            message_number: message
+        }
 
     async def on_message(self, message: discord.Message):
         # only respond to DM's
@@ -173,9 +229,10 @@ class Client(discord.Client):
             await self.connection_request(message)
             return
 
-        print("New message from", message.author)
-        await self.parse_message(message)
-        return
+        if message.content.startswith("```ml\nMESSAGE"):
+            print("New message from", message.author)
+            await self.parse_message(message)
+            return
 
 
 if __name__ == '__main__':
