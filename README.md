@@ -16,7 +16,8 @@ there are no known instances of people getting banned for it.
 
 ## todo
 
-- [ ] Make it work lol
+- [x] Make it work lol
+- [ ] Add a UI
 - [x] Detect when a message is too long and break it into multiple parts
 - [ ] Add trusted master certificates and sign temporary certificates to prevent MIM attacks
 - [ ] Group chats / multiple DM members

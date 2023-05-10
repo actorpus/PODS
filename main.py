@@ -7,6 +7,7 @@ from datetime import timedelta
 import os
 from functools import wraps
 import random
+import logging
 
 
 def encode_to_braille(data: bytes) -> str:
@@ -250,10 +251,12 @@ class Client(discord.Client):
 
 
 if __name__ == '__main__':
+    handler = logging.FileHandler(filename='discord.log', encoding='utf-8', mode='w')
+
     try:
         token = os.environ["UserToken"]
     except KeyError:
         print("UserToken not found in environment variables")
         token = input("Enter token now > ")
 
-    Client().run(token)
+    Client().run(token, log_handler=handler, log_level=logging.INFO)
