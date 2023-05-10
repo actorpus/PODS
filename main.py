@@ -45,11 +45,19 @@ class Conversation(threading.Thread):
 
         self._channel = channel
         self._user_client = user
+        self._companion = ""
 
         self._keypair = self._generate_key()
         self._partner_pubkey: pgpy.PGPKey | None = None
 
+    def run(self) -> None:
+        while True:
+            inp = input()
+            self.send_message(inp)
+
     def bind_partner(self, message):
+        self._companion = str(message.author)
+
         message = message.content \
             .replace("```ml\nTEMPORARY CONVERSATION KEY\n``````", "") \
             .replace("``````yaml\nsencrypord\n```", "") \
@@ -62,8 +70,13 @@ class Conversation(threading.Thread):
         self.send_message("Key received!")
 
     def parse_message(self, message):
-        print("new message", message.author, message.content)
-        # decrypt and push message to veiwer
+        message = message.replace("\n", "")
+        message = decode_from_braille(message)
+        message = pgpy.PGPMessage.from_blob(message)
+        message = self._keypair.decrypt(message)
+        message = str(message.message)
+
+        print(f"{self._companion:32s} | {message}")
 
     def _generate_key(self):
         key = pgpy.PGPKey.new(PubKeyAlgorithm.RSAEncryptOrSign, 2048)
@@ -145,6 +158,8 @@ class Client(discord.Client):
         conv.send_key()
         conv.send_message("Connected successfully")
 
+        conv.start()
+
         self.conversations[channel.id] = conv
 
     async def _update_messages(self):
@@ -175,12 +190,12 @@ class Client(discord.Client):
         await self.start_conversation(message.channel)
         self.conversations[message.channel.id].bind_partner(message)
 
-    async def parse_message(self, message):
-        if message.channel.id not in self.conversations:
+    async def parse_message(self, disc_message):
+        if disc_message.channel.id not in self.conversations:
             return
 
-        message_number, message = message.content\
-            .replace("```ml\nMESSAGE ", "", 1)\
+        message_number, message = disc_message.content \
+            .replace("```ml\nMESSAGE ", "", 1) \
             .split(" ", 1)
         message_number = int(message_number)
 
@@ -190,23 +205,24 @@ class Client(discord.Client):
         message_id, message = message.split("\n", 1)
         message_id = message_id[2:]
 
-        message = message\
-            .replace("``````", "", 1)\
+        message = message \
+            .replace("``````", "", 1) \
             .replace("``````yaml\nsencrypord\n```", "", 1)
 
         if message_id in self.message_parts:
             self.message_parts[message_id][message_number] = message
 
-            if len(self.message_parts[message_id]) == total_parts:
-                self.conversations[message.channel.id].parse_message(
-                    "".join(self.message_parts[message_id].values())
-                )
+        else:
+            self.message_parts[message_id] = {
+                message_number: message
+            }
 
-            return
+        if len(self.message_parts[message_id]) == total_parts:
+            self.conversations[disc_message.channel.id].parse_message(
+                "".join(self.message_parts[message_id].values())
+            )
 
-        self.message_parts[message_id] = {
-            message_number: message
-        }
+            del self.message_parts[message_id]
 
     async def on_message(self, message: discord.Message):
         # only respond to DM's
@@ -225,12 +241,10 @@ class Client(discord.Client):
             return
 
         if message.content.startswith("```ml\nTEMPORARY CONVERSATION KEY\n```"):
-            print("Conversation request from", message.author)
             await self.connection_request(message)
             return
 
         if message.content.startswith("```ml\nMESSAGE"):
-            print("New message from", message.author)
             await self.parse_message(message)
             return
 
