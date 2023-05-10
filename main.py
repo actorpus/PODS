@@ -207,6 +207,8 @@ class Conversation:
             print("Failed to send message, no pubkey was found")
             return
 
+        self.messages.append((str(self._user_client.user), message, int(time.time())))
+
         message_id = random.randbytes(8).hex().upper()
 
         message = pgpy.PGPMessage.new(message)
