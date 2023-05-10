@@ -1,12 +1,14 @@
 import discord
 import pgpy
-from pgpy.constants import PubKeyAlgorithm, KeyFlags, HashAlgorithm
+from pgpy.constants import PubKeyAlgorithm, KeyFlags
 import threading
 import asyncio
 from datetime import timedelta
 import os
-from functools import wraps
 import random
+import curses
+from curses import textpad
+import time
 
 
 def encode_to_braille(data: bytes) -> str:
@@ -39,9 +41,107 @@ def break_every_n(text, n):
     return "\n".join(partial)
 
 
-class Conversation(threading.Thread):
+class Renderer(threading.Thread):
+    def __init__(self):
+        super(Renderer, self).__init__()
+
+        self.conversations = []
+        self.current_conversation = -1
+
+        self.window_running = True
+        self.entry_field = ""
+        self.entry_pointer = 0
+
+    def run(self) -> None:
+        curses.wrapper(self.main)
+
+    def main(self, stdscr: curses.window):
+        stdscr.timeout(100)  # times out the getch to 100ms
+
+        while self.window_running:
+            key = stdscr.getch()
+
+            # Esc
+            if key == 27:
+                self.window_running = False
+
+            # ASCII printable characters
+            elif 32 <= key <= 126:
+                self.entry_field = self.entry_field[:self.entry_pointer] + chr(key) + self.entry_field[self.entry_pointer:]
+                self.entry_pointer += 1
+
+            # backspace
+            elif key == 8 and self.entry_pointer > 0:
+                self.entry_field = self.entry_field[:self.entry_pointer - 1] + self.entry_field[self.entry_pointer:]
+                self.entry_pointer -= 1
+
+            # delete
+            elif key == 330 and self.entry_pointer < len(self.entry_field):
+                self.entry_field = self.entry_field[:self.entry_pointer] + self.entry_field[self.entry_pointer + 1:]
+
+            # left arrow
+            elif key == 260:
+                self.entry_pointer -= 1
+
+                if self.entry_pointer == -1:
+                    self.entry_pointer = len(self.entry_field)
+
+            # right arrow
+            elif key == 261:
+                self.entry_pointer += 1
+
+                if self.entry_pointer > len(self.entry_field):
+                    self.entry_pointer = 0
+
+            # entry key
+            elif key == 10 and self.entry_field:
+                self._send_message(self.entry_field)
+                self.entry_field = ""
+                self.entry_pointer = 0
+
+            elif key > 0:
+                print("unknown key", key)
+
+            screen_size = stdscr.getmaxyx()
+            stdscr.clear()
+            textpad.rectangle(stdscr, 1, 2, screen_size[0] - 2, screen_size[1] - 3)
+            stdscr.addstr(0, (screen_size[1] // 2) - 5, "sencrypord")
+
+            if self.current_conversation == -1:
+                stdscr.addstr(screen_size[0] // 2, (screen_size[1] // 2) - 8, "No Conversations")
+                continue
+
+            message_space = screen_size[0] - 3
+
+            if message_space <= 0:
+                stdscr.addstr(screen_size[0] // 2, (screen_size[1] // 2) - 10, "Please resize window")
+                continue
+
+            for i, (author, message, time_sent) in enumerate(list(reversed(self._get_messages()))[:message_space - 2]):
+                t = time.strftime("%H:%M", time.localtime(time_sent))
+                stdscr.addstr(message_space - i - 1, 3, f"{t:5s} {author:>26s} │ {message}")
+
+            stdscr.addstr(message_space, 36, "╞>")
+            stdscr.addstr(1, 36, "┬")
+            stdscr.addstr(message_space + 1, 36, "┴")
+            stdscr.addstr(message_space, 38, self.entry_field)
+
+            stdscr.move(message_space, 38 + self.entry_pointer)
+
+    def add_conversation(self, conversation):
+        self.conversations.append(conversation)
+        self.current_conversation += 1
+
+    def _send_message(self, message: str) -> None:
+        self.conversations[self.current_conversation].send_message(message)
+
+    def _get_messages(self) -> list[tuple[str, str, int]]:
+        return self.conversations[self.current_conversation].messages
+
+
+class Conversation:
     def __init__(self, channel: discord.DMChannel, user):
-        super(Conversation, self).__init__()
+        # super(Conversation, self).__init__()
 
         self._channel = channel
         self._user_client = user
@@ -50,10 +150,12 @@ class Conversation(threading.Thread):
         self._keypair = self._generate_key()
         self._partner_pubkey: pgpy.PGPKey | None = None
 
-    def run(self) -> None:
-        while True:
-            inp = input()
-            self.send_message(inp)
+        self.messages = []
+
+    # def run(self) -> None:
+    #     while True:
+    #         inp = input()
+    #         self.send_message(inp)
 
     def bind_partner(self, message):
         self._companion = str(message.author)
@@ -76,7 +178,7 @@ class Conversation(threading.Thread):
         message = self._keypair.decrypt(message)
         message = str(message.message)
 
-        print(f"{self._companion:32s} | {message}")
+        self.messages.append((self._companion, message, int(time.time())))
 
     def _generate_key(self):
         key = pgpy.PGPKey.new(PubKeyAlgorithm.RSAEncryptOrSign, 2048)
@@ -152,14 +254,17 @@ class Client(discord.Client):
         self.message_que = []
         self.message_parts = {}
 
+        self.renderer: None | Renderer = None
+
     async def start_conversation(self, channel):
         conv = Conversation(channel, self)
 
         conv.send_key()
         conv.send_message("Connected successfully")
 
-        conv.start()
+        # conv.start()
 
+        self.renderer.add_conversation(conv)
         self.conversations[channel.id] = conv
 
     async def _update_messages(self):
@@ -177,6 +282,9 @@ class Client(discord.Client):
 
     async def on_ready(self):
         print(f"logging in as {self.user}, waiting for conversations")
+
+        self.renderer = Renderer()
+        self.renderer.start()
 
         while True:
             await self._update_messages()
